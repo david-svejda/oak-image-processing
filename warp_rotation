@@ -1,0 +1,118 @@
+import math
+import cv2
+import depthai as dai
+import numpy as np
+
+# Initialize pipeline
+pipeline = dai.Pipeline()
+
+
+
+# Function to set up the camera
+def setup_camera(cam_id):
+    camRgb = pipeline.create(dai.node.ColorCamera)
+    camRgb.setBoardSocket(cam_id)
+    camRgb.setPreviewSize(1920, 1200)  # Match camera resolution
+    camRgb.setInterleaved(False)
+    camRgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1200_P)
+    return camRgb
+
+
+# Function to apply a rotation matrix to the mesh points
+def rotate_point(x, y, z, rx, ry, rz):
+    # Rotation matrices for X, Y, and Z axes
+    rot_x_matrix = np.array([[1, 0, 0],
+                             [0, np.cos(rx), -np.sin(rx)],
+                             [0, np.sin(rx), np.cos(rx)]])
+
+    rot_y_matrix = np.array([[np.cos(ry), 0, np.sin(ry)],
+                             [0, 1, 0],
+                             [-np.sin(ry), 0, np.cos(ry)]])
+
+    rot_z_matrix = np.array([[np.cos(rz), -np.sin(rz), 0],
+                             [np.sin(rz), np.cos(rz), 0],
+                             [0, 0, 1]])
+
+    # Combine rotation matrices
+    rotation_matrix = rot_z_matrix @ rot_y_matrix @ rot_x_matrix
+
+    # Apply the rotation
+    point = np.array([x, y, z])
+    rotated_point = rotation_matrix @ point
+
+    return rotated_point[0], rotated_point[1], rotated_point[2]
+
+
+# Function to set up the warp and apply camera rotation
+def set_wrap(cam, pipeline, rot_x, rot_y, rot_z):
+    warp1 = pipeline.create(dai.node.Warp)
+    # Define the initial mesh points
+    points = [
+        np.array([0, 0, 280]),  # Top left (tl)
+        np.array([2560 , 0, 280]),  # Top right (tr)
+        np.array([0, 800, 280]),  # Middle left (ml)
+        np.array([2560 , 800, 280]),  # Middle right (mr)
+        np.array([0, 1600, 280]),  # Bottom left (bl)
+        np.array([2560 , 1600, 280])  # Bottom right (br)
+    ]
+
+    # Apply rotation to each point
+    rotated_points = [rotate_point(p[0], p[1], p[2], rot_x, rot_y, rot_z) for p in points]
+
+
+    # Convert rotated points to dai.Point2f objects
+    tl, tr, ml, mr, bl, br = [dai.Point2f(int(p[0]), int(p[1])) for p in rotated_points]
+
+    # Output frame size
+    WARP1_OUTPUT_FRAME_SIZE = (640 , 480)
+
+    warp1.setWarpMesh([tl, tr, ml, mr, bl, br], 2, 2)
+    warp1.setOutputSize(WARP1_OUTPUT_FRAME_SIZE)
+    warp1.setMaxOutputFrameSize(WARP1_OUTPUT_FRAME_SIZE[0] * WARP1_OUTPUT_FRAME_SIZE[1] * 3)
+    warp1.setHwIds([1])
+    warp1.setInterpolation(dai.Interpolation.NEAREST_NEIGHBOR)
+
+    # Link camera to warp input
+    cam.preview.link(warp1.inputImage)
+
+    # Create XLinkOut for output
+    xout1 = pipeline.create(dai.node.XLinkOut)
+    xout1.setStreamName('out1')
+    warp1.out.link(xout1.input)
+
+
+# Set up the camera (north)
+cam_north = setup_camera(dai.CameraBoardSocket.CAM_A)
+x = 0 #math.pi/8
+y = math.pi/8
+z = math.pi/5
+# Apply wrap transformation to the camera preview with rotation (example rotations provided)
+set_wrap(cam_north, pipeline, x, y, z)  # Example rotation values for x, y, z axes
+
+# Start the pipeline
+print("Starting pipeline...")
+with dai.Device(pipeline) as device:
+    print("Pipeline started!")
+    # Output queue for warped frames
+    q1 = device.getOutputQueue(name="out1", maxSize=8, blocking=False)
+    step = 0.02
+    while True:
+        q1 = device.getOutputQueue(name="out1", maxSize=8, blocking=False)
+
+        if cv2.waitKey(1) == ord('a'):
+
+            z += step
+            set_wrap(cam_north, pipeline, x, y, z)
+            print(z)
+
+        in1 = q1.get()
+        if in1 is not None:
+            # Show the warped preview using OpenCV
+            cv2.imshow("Warped Preview", in1.getCvFrame())
+
+        # Break the loop on 'q' key press
+        if cv2.waitKey(1) == ord('q'):
+            break
+
+# Cleanup
+cv2.destroyAllWindows()
